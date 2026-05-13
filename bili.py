@@ -30,8 +30,6 @@ import argparse
 # ─────────────────────────────────────────────
 # 配置
 # ─────────────────────────────────────────────
-ZEN_PROFILE_DIR = r"C:\Users\14582\AppData\Roaming\zen\Profiles"
-
 HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
                   '(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
@@ -53,15 +51,10 @@ MIXIN_KEY_ENC_TAB = [
 # ─────────────────────────────────────────────
 # Cookies
 # ─────────────────────────────────────────────
-def get_zen_cookies(domain_filter='bilibili'):
-    """从 Zen Browser SQLite 直接读取 cookies，不需要解密"""
-    dbs = glob.glob(os.path.join(ZEN_PROFILE_DIR, "*", "cookies.sqlite"))
-    if not dbs:
-        print("⚠️  未找到 Zen Browser cookies.sqlite，AI字幕可能获取失败", file=sys.stderr)
-        return {}
-    db = max(dbs, key=os.path.getsize)
+def _read_firefox_cookies(db_path, domain_filter='bilibili'):
+    """从 Firefox 类浏览器的 cookies.sqlite 读取（无需管理员）"""
     tmp = '_tmp_bili.sqlite'
-    shutil.copy2(db, tmp)
+    shutil.copy2(db_path, tmp)
     try:
         conn = sqlite3.connect(tmp)
         rows = conn.execute(
@@ -72,10 +65,57 @@ def get_zen_cookies(domain_filter='bilibili'):
     finally:
         if os.path.exists(tmp):
             os.remove(tmp)
-    cookies = {r[0]: r[1] for r in rows}
-    if not cookies.get('SESSDATA'):
-        print("⚠️  B站未登录（无 SESSDATA），AI字幕可能无法获取，请先在 Zen Browser 登录 bilibili.com", file=sys.stderr)
-    return cookies
+    return {r[0]: r[1] for r in rows}
+
+
+def _find_firefox_based_cookies(domain_filter='bilibili'):
+    """自动检测所有 Firefox 类浏览器，返回第一个有 SESSDATA 的"""
+    search_paths = [
+        # Zen Browser
+        os.path.expanduser(r"~\AppData\Roaming\zen\Profiles"),
+        # Firefox
+        os.path.expanduser(r"~\AppData\Roaming\Mozilla\Firefox\Profiles"),
+        # LibreWolf
+        os.path.expanduser(r"~\AppData\Roaming\librewolf\Profiles"),
+    ]
+    for profile_dir in search_paths:
+        dbs = glob.glob(os.path.join(profile_dir, "*", "cookies.sqlite"))
+        for db in sorted(dbs, key=os.path.getsize, reverse=True):
+            cookies = _read_firefox_cookies(db, domain_filter)
+            if cookies.get('SESSDATA'):
+                return cookies
+    return None
+
+
+def get_cookies(domain_filter='bilibili'):
+    """
+    获取 bilibili cookies，按优先级尝试:
+    1. cookies.json（setup_cookies.py 导出，支持任何浏览器）
+    2. Firefox 类浏览器自动检测（Zen/Firefox/LibreWolf，无需管理员）
+    3. 都没有 → 提示用户运行 setup_cookies.py
+    """
+    # 1. 读已导出的 cookies.json
+    json_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'cookies.json')
+    if os.path.exists(json_path):
+        try:
+            with open(json_path, 'r', encoding='utf-8') as f:
+                cookies = json.load(f)
+            if cookies.get('SESSDATA'):
+                return cookies
+        except Exception:
+            pass
+
+    # 2. 自动检测 Firefox 类浏览器
+    cookies = _find_firefox_based_cookies(domain_filter)
+    if cookies:
+        return cookies
+
+    # 3. 都没有
+    print("⚠️  未找到 bilibili cookies", file=sys.stderr)
+    print("   请运行以下命令导出 cookies（Chrome/Edge 需要管理员）:", file=sys.stderr)
+    print("     python setup_cookies.py chrome", file=sys.stderr)
+    print("   或者安装 Zen Browser 并登录 bilibili.com（免管理员）", file=sys.stderr)
+    return {}
 
 
 # ─────────────────────────────────────────────
@@ -139,7 +179,7 @@ def fetch_subtitles(bvid):
     print(f"👤 {info['owner']}  ⏱️  {dur // 60}:{dur % 60:02d}")
 
     # 带 cookies + WBI 签名请求字幕列表
-    cookies = get_zen_cookies('bilibili')
+    cookies = get_cookies('bilibili')
     mixin_key = get_mixin_key()
     params = sign_params({'bvid': bvid, 'cid': info['cid']}, mixin_key)
 
