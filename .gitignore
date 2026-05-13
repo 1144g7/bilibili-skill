@@ -1,2 +1,7 @@
+cookies/
 cookies.json
 _tmp_bili.sqlite
+_tmp_sub.*
+_tmp_setup.sqlite
+_tmp_cookies.sqlite
+__pycache__/
