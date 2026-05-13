@@ -224,6 +224,90 @@ LANG_PRIORITY = {
 
 
 # ─────────────────────────────────────────────
+# Whisper 兜底
+# ─────────────────────────────────────────────
+def _download_audio(url, cookies_path=None):
+    """用 yt-dlp 下载音频"""
+    import glob as _g
+    base = os.path.join('.', '_tmp_audio')
+    # 清理旧文件
+    for old in _g.glob(f"{base}.*"):
+        try: os.remove(old)
+        except: pass
+
+    cmd = [
+        sys.executable, '-m', 'yt_dlp',
+        '-f', 'bestaudio[ext=m4a]',
+        '-x', '--audio-format', 'mp3',
+        '-o', f'{base}.%(ext)s',
+        '--no-warnings',
+    ]
+    if cookies_path:
+        cmd += ['--cookies', cookies_path]
+    cmd.append(url)
+
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=120, encoding='utf-8')
+    if r.returncode != 0:
+        import time; time.sleep(3)
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=120, encoding='utf-8')
+
+    # 找下载的文件
+    for ext in ['mp3', 'm4a', 'webm', 'opus']:
+        path = f"{base}.{ext}"
+        if os.path.exists(path):
+            print(f"  📥 音频下载完成: {ext}", file=sys.stderr)
+            return path
+    return None
+
+
+def _whisper_transcribe(audio_path):
+    """调用 Whisper 转写"""
+    try:
+        import whisper
+    except ImportError:
+        print("  Whisper 未安装，跳过转写", file=sys.stderr)
+        return None
+
+    print(f"  🎤 Whisper 转写中...", file=sys.stderr)
+    try:
+        model = whisper.load_model("base")
+        result = model.transcribe(audio_path, fp16=False)
+        text = result.get('text', '').strip()
+        if text:
+            print(f"  ✅ 转写完成: {len(text)} 字", file=sys.stderr)
+            return text
+    except Exception as e:
+        print(f"  ❌ Whisper 失败: {e}", file=sys.stderr)
+    return None
+
+
+def _output_text(text, title, dur_str, source, args):
+    """统一输出（字幕和 Whisper 共用）"""
+    lines = text.count('\n') + 1
+    if args.mode == 'summarize':
+        print("=" * 60)
+        print(f"SUBTITLE_FOR_SUMMARIZATION")
+        print(f"标题: {title}")
+        print(f"时长: {dur_str}")
+        print(f"来源: {source}")
+        print(f"行数: {lines}")
+        print("=" * 60)
+        print(text)
+        print("=" * 60)
+        print("END_OF_SUBTITLE")
+    else:
+        import re as _re, shutil
+        safe = _re.sub(r'[\\/:*?"<>|]', '_', title)[:60]
+        txt_path = os.path.join(args.output_dir, f"{safe}.txt")
+        with open(txt_path, 'w', encoding='utf-8') as f:
+            f.write(text)
+        print(f"\n💾 已保存:")
+        print(f"   TXT → {txt_path}")
+        print(f"   来源: {source}")
+        print(f"   行数: {lines}")
+
+
+# ─────────────────────────────────────────────
 # 主入口
 # ─────────────────────────────────────────────
 def main():
@@ -283,57 +367,35 @@ def main():
 
     if cookies_path:
         print(f"🔑 使用 cookies: {os.path.basename(cookies_path)}", file=sys.stderr)
-    if cookies_path:
-        print(f"🔑 使用 cookies: {os.path.basename(cookies_path)}", file=sys.stderr)
 
     code, stderr = download_sub(url, lang, 'srt', base, cookies_path)
 
     srt_file = _find_downloaded_srt(base)
+
+    # ── Whisper 兜底：没字幕 → 下载音频 → 转写 ──
     if not srt_file:
-        print("❌ 字幕下载失败，该视频可能没有字幕", file=sys.stderr)
-        if stderr:
-            print(f"   yt-dlp: {stderr.strip()[:200]}", file=sys.stderr)
-        # 清理
-        for f in os.listdir(args.output_dir if args.mode == 'subtitle' else '.'):
-            if f.startswith('_tmp_sub'):
-                try:
-                    os.remove(f)
-                except:
-                    pass
+        print("ℹ️  无字幕，尝试 Whisper 转写兜底...", file=sys.stderr)
+        audio_file = _download_audio(url, cookies_path)
+        if audio_file:
+            text = _whisper_transcribe(audio_file)
+            if text:
+                _output_text(text, title, dur_str, 'Whisper', args)
+                try: os.remove(audio_file)
+                except: pass
+                return
+            try: os.remove(audio_file)
+            except: pass
+
+        print("❌ 字幕获取失败（无字幕 + Whisper 不可用）", file=sys.stderr)
+        print("   安装 Whisper: pip install openai-whisper", file=sys.stderr)
         sys.exit(2)
 
-    # 输出
+    # 正常路径：有字幕
     text = _parse_srt_to_text(srt_file)
-    lines = text.count('\n') + 1
 
-    if args.mode == 'summarize':
-        print("=" * 60)
-        print(f"SUBTITLE_FOR_SUMMARIZATION")
-        print(f"标题: {title}")
-        print(f"时长: {dur_str}")
-        print(f"字幕文件: {os.path.basename(srt_file)}")
-        print(f"行数: {lines}")
-        print("=" * 60)
-        print(text)
-        print("=" * 60)
-        print("END_OF_SUBTITLE")
-    else:
-        # 保存到本地
-        import re as _re
-        safe = _re.sub(r'[\\/:*?"<>|]', '_', title)[:60]
-        txt_path = os.path.join(args.output_dir, f"{safe}.txt")
-        srt_path = os.path.join(args.output_dir, f"{safe}.srt")
-
-        with open(txt_path, 'w', encoding='utf-8') as f:
-            f.write(text)
-        # 复制下载的 srt
-        import shutil
-        shutil.copy2(srt_file, srt_path)
-
-        print(f"\n💾 已保存:")
-        print(f"   TXT → {txt_path}")
-        print(f"   SRT → {srt_path}")
-        print(f"   行数: {lines}")
+    # 输出
+    source = os.path.basename(srt_file)
+    _output_text(text, title, dur_str, source, args)
 
     # 清理临时文件
     try:
